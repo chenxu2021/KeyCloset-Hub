@@ -1,101 +1,144 @@
 """
-KeyCloset Hub - 主窗口 (v2.0 — 圆角窗口 + 阴影 + 工具栏 + 空状态 + toast)
+KeyCloset Hub - 主窗口
+无边框主窗口，整合侧边栏、列表视图、搜索栏、状态栏。
+
+核心职责:
+  1. 连接所有 UI 组件与业务逻辑
+  2. 处理加密/解密流程 (密码条目及笔记内容)
+  3. 管理键盘快捷键
+  4. 协调各模块间的数据流
 """
 
 import json
-from datetime import datetime
 
-from PyQt5.QtCore import Qt, QTimer, QRectF, QPropertyAnimation, QPoint, QEasingCurve
-from PyQt5.QtGui import QFont, QKeySequence, QPainterPath, QRegion, QColor
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QFont, QKeySequence
 from PyQt5.QtWidgets import (
-    QApplication, QGraphicsDropShadowEffect,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QPushButton, QShortcut, QStatusBar, QVBoxLayout, QWidget, QSizePolicy,
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QShortcut,
+    QSplitter,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
 )
 
-from ..crypto import decrypt_data, encrypt_data, get_fernet
+from ..crypto import decrypt_data, encrypt_data
 from ..database import Database
-from ..models import ItemModel, CATEGORIES
+from ..models import ItemModel
 from ..utils import format_relative_time, export_note
 from .document_view import DocumentImporter, open_document_file
 from .list_view import ItemListWidget
+from .login_dialog import LoginDialog
 from .note_editor import NoteEditor
 from .password_editor import PasswordEditor
 from .search_bar import SearchBar
 from .sidebar import Sidebar
-from .theme import COLORS, DIMENSIONS, SHADOW, GLOBAL_STYLESHEET, get_icon
+from .theme import COLORS, DIMENSIONS, GLOBAL_STYLESHEET
 
 
 class MainWindow(QMainWindow):
-    """KeyCloset Hub 主窗口 — 圆角 + 阴影 + 工具栏。"""
+    """
+    KeyCloset Hub 主窗口。
+
+    生命周期:
+      1. 构造时初始化数据库和加密层
+      2. 弹出 LoginDialog 验证主密码
+      3. 验证通过后加载 UI 和数据
+      4. 运行中处理用户操作和加解密
+      5. 锁定时清除内存中的敏感数据
+    """
 
     def __init__(self, database: Database, master_password: str, lock_callback):
         super().__init__()
         self.database = database
         self.master_password = master_password
-        self._lock_callback = lock_callback
+        self._lock_callback = lock_callback  # 锁定回调，由 app.py 提供
+
+        # 初始化 Fernet 加密实例
         salt_hex = self.database.get_setting("salt")
+        from ..crypto import get_fernet
         self._fernet = get_fernet(master_password, salt_hex)
+
+        # 当前状态
         self._current_category = "password"
         self._search_query = ""
+
         self._setup_window()
         self._setup_shortcuts()
         self._apply_stylesheet()
         self._refresh_content()
 
-    # ---------- 窗口搭建 ----------
-
     def _setup_window(self):
+        """初始化主窗口 UI 布局。"""
         self.setWindowTitle("KeyCloset Hub")
         self.setMinimumSize(DIMENSIONS["window_min_width"], DIMENSIONS["window_min_height"])
         self.resize(DIMENSIONS["window_width"], DIMENSIONS["window_height"])
+
+        # 无边框窗口 (保留 Qt.Window 确保作为顶层窗口)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
 
-        # 外层容器 — 负责圆角和阴影
-        self._container = QWidget(objectName="windowContainer")
-        self._container.setStyleSheet(f"""
-            #windowContainer {{
-                background-color: {COLORS['bg_window']};
-                border: 1px solid {COLORS['border_light']};
-                border-radius: {DIMENSIONS['border_radius_window']}px;
-            }}
-        """)
-        self.setCentralWidget(self._container)
+        # 中央组件
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # 容器内布局
-        outer = QVBoxLayout(self._container)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        # ---- 自定义标题栏 ----
+        main_layout.addWidget(self._create_titlebar())
 
-        # 标题栏
-        self._titlebar = self._create_titlebar()
-        outer.addWidget(self._titlebar)
-
-        # 工具栏
-        outer.addWidget(self._create_toolbar())
-
-        # 主体：侧边栏 + 分割线 + 内容
+        # ---- 主体区域: 侧边栏 + 分割线 + 内容 ----
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
+        # 侧边栏
         self.sidebar = Sidebar()
         self.sidebar.category_changed.connect(self._on_category_changed)
         self.sidebar.tag_selected.connect(self._on_tag_selected)
         body_layout.addWidget(self.sidebar)
 
+        # 分割线
         divider = QWidget()
         divider.setFixedWidth(1)
         divider.setStyleSheet(f"background-color: {COLORS['border_light']};")
         body_layout.addWidget(divider)
 
-        # 右侧内容（列表 + 空状态叠加层）
-        content_stack = QWidget()
-        content_stack_layout = QVBoxLayout(content_stack)
-        content_stack_layout.setContentsMargins(0, 0, 0, 0)
-        content_stack_layout.setSpacing(0)
+        # 右侧内容区域
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
 
+        # 内容区域顶部的搜索栏 (与侧边栏平级但在右侧顶部)
+        search_container = QWidget()
+        search_container.setFixedHeight(44)
+        search_container.setStyleSheet(f"background-color: {COLORS['bg_titlebar']};")
+        search_layout = QHBoxLayout(search_container)
+        search_layout.setContentsMargins(16, 8, 16, 8)
+
+        # 分类标题
+        self.category_title = QLabel("密码")
+        self.category_title.setFont(QFont("Segoe UI", 14))
+        self.category_title.setStyleSheet(f"font-weight: 600; color: {COLORS['text_primary']};")
+        search_layout.addWidget(self.category_title)
+        search_layout.addStretch()
+
+        # 搜索栏
+        self.search_bar = SearchBar()
+        self.search_bar.search_changed.connect(self._on_search_changed)
+        search_layout.addWidget(self.search_bar)
+
+        content_layout.addWidget(search_container)
+
+        # 列表视图
         self.list_view = ItemListWidget()
         self.list_view.item_copy_password.connect(self._on_copy_password)
         self.list_view.item_copy_account.connect(self._on_copy_account)
@@ -103,19 +146,13 @@ class MainWindow(QMainWindow):
         self.list_view.item_delete.connect(self._on_delete_item)
         self.list_view.item_toggle_favorite.connect(self._on_toggle_favorite)
         self.list_view.item_open_file.connect(self._on_open_document)
-        content_stack_layout.addWidget(self.list_view)
+        content_layout.addWidget(self.list_view)
 
-        # 空状态占位
-        self._empty_label = QLabel()
-        self._empty_label.setAlignment(Qt.AlignCenter)
-        self._empty_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 13px;")
-        self._empty_label.hide()
-        content_stack_layout.addWidget(self._empty_label)
+        body_layout.addWidget(content)
 
-        body_layout.addWidget(content_stack)
-        outer.addWidget(body)
+        main_layout.addWidget(body)
 
-        # 状态栏
+        # ---- 状态栏 ----
         self.status_bar = QStatusBar()
         self.status_bar.setFixedHeight(DIMENSIONS["statusbar_height"])
         self.status_bar.setStyleSheet(f"""
@@ -128,128 +165,139 @@ class MainWindow(QMainWindow):
         """)
         self.status_label = QLabel("")
         self.status_bar.addWidget(self.status_label)
-        outer.addWidget(self.status_bar)
+        self.status_bar.addPermanentWidget(QLabel("Ctrl+N 新增  Ctrl+E 编辑  Ctrl+C 复制  Ctrl+L 锁定"))
+        main_layout.addWidget(self.status_bar)
+
         self._update_status_bar()
 
-    # ---------- 标题栏 ----------
+    def _create_titlebar(self) -> QWidget:
+        """创建自定义无边框标题栏。"""
+        titlebar = QWidget()
+        titlebar.setFixedHeight(DIMENSIONS["titlebar_height"])
+        titlebar.setStyleSheet(f"background-color: {COLORS['bg_titlebar']};")
+        titlebar.mousePressEvent = self._titlebar_mouse_press
+        titlebar.mouseMoveEvent = self._titlebar_mouse_move
+        titlebar.mouseDoubleClickEvent = self._titlebar_double_click
 
-    def _create_titlebar(self):
-        tb = QWidget()
-        tb.setFixedHeight(DIMENSIONS["titlebar_height"])
-        tb.setStyleSheet(f"background-color: {COLORS['bg_titlebar']}; border-top-left-radius: {DIMENSIONS['border_radius_window']}px; border-top-right-radius: {DIMENSIONS['border_radius_window']}px;")
-        tb.mousePressEvent = self._titlebar_mouse_press
-        tb.mouseMoveEvent = self._titlebar_mouse_move
-        tb.mouseDoubleClickEvent = self._titlebar_double_click
-        layout = QHBoxLayout(tb)
-        layout.setContentsMargins(16, 0, 4, 0)
+        layout = QHBoxLayout(titlebar)
+        layout.setContentsMargins(12, 0, 4, 0)
         layout.setSpacing(0)
-        app_label = QLabel("KeyCloset Hub")
+
+        # 应用图标和标题
+        app_label = QLabel("⚿  KeyCloset Hub")
         app_label.setFont(QFont("Segoe UI", 11))
-        app_label.setStyleSheet(f"color: {COLORS['text_primary']}; font-weight: 600;")
+        app_label.setStyleSheet(f"color: {COLORS['text_primary']}; font-weight: 500;")
         layout.addWidget(app_label)
         layout.addStretch()
 
-        btn = ("QPushButton { background:transparent; border:none; border-radius:4px; "
-               "padding:4px 10px; font-size:14px; color:#999; min-width:32px; } "
-               "QPushButton:hover { background:#E8E8E8; color:#333; }")
-        for text, slot in [("−", self.showMinimized), ("□", self._toggle_maximize), ("✕", self.close)]:
-            b = QPushButton(text)
-            b.setStyleSheet(btn)
-            b.clicked.connect(slot)
-            layout.addWidget(b)
+        # 窗口控制按钮
+        btn_style = """
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 14px;
+                color: #666666;
+                min-width: 32px;
+            }
+            QPushButton:hover {
+                background-color: #E0E0E0;
+                color: #1A1A1A;
+            }
+        """
+
+        minimize_btn = QPushButton("−")
+        minimize_btn.setStyleSheet(btn_style)
+        minimize_btn.clicked.connect(self.showMinimized)
+        layout.addWidget(minimize_btn)
+
+        maximize_btn = QPushButton("□")
+        maximize_btn.setStyleSheet(btn_style)
+        maximize_btn.clicked.connect(self._toggle_maximize)
+        layout.addWidget(maximize_btn)
+
+        close_btn = QPushButton("✕")
+        close_btn.setStyleSheet(btn_style + """
+            QPushButton:hover {
+                background-color: #E0E0E0;
+                color: #1A1A1A;
+            }
+        """)
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
         self._drag_pos = None
-        return tb
+        return titlebar
 
-    def _titlebar_mouse_press(self, e):
-        if e.button() == Qt.LeftButton:
-            self._drag_pos = e.globalPos()
+    # ---------- 无边框窗口拖动 ----------
 
-    def _titlebar_mouse_move(self, e):
-        if self._drag_pos and e.buttons() == Qt.LeftButton:
-            self.move(self.pos() + e.globalPos() - self._drag_pos)
-            self._drag_pos = e.globalPos()
+    def _titlebar_mouse_press(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPos()
 
-    def _titlebar_double_click(self, e):
+    def _titlebar_mouse_move(self, event):
+        if self._drag_pos and event.buttons() == Qt.LeftButton:
+            delta = event.globalPos() - self._drag_pos
+            self.move(self.pos() + delta)
+            self._drag_pos = event.globalPos()
+
+    def _titlebar_double_click(self, event):
         self._toggle_maximize()
 
     def _toggle_maximize(self):
-        self.showNormal() if self.isMaximized() else self.showMaximized()
-
-    # ---------- 工具栏 ----------
-
-    def _create_toolbar(self):
-        bar = QWidget()
-        bar.setFixedHeight(DIMENSIONS["toolbar_height"])
-        bar.setStyleSheet(f"background-color: {COLORS['bg_titlebar']}; border-bottom: 1px solid {COLORS['border_light']};")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 4, 12, 4)
-        layout.setSpacing(8)
-
-        # 分类标题
-        self.category_title = QLabel("密码")
-        self.category_title.setFont(QFont("Segoe UI", 13))
-        self.category_title.setStyleSheet(f"font-weight: 600; color: {COLORS['text_primary']};")
-        layout.addWidget(self.category_title)
-
-        layout.addStretch()
-
-        # 新增按钮 (鼠标可点击)
-        self._add_btn = QPushButton(" 新增")
-        self._add_btn.setIcon(get_icon("add"))
-        self._add_btn.setStyleSheet("""
-            QPushButton { background:#F0F0F0; border:1px solid #DDD; border-radius:6px; padding:4px 12px; font-size:12px; }
-            QPushButton:hover { background:#E5E5E5; }
-        """)
-        self._add_btn.clicked.connect(self._on_new_item)
-        layout.addWidget(self._add_btn)
-
-        # 锁定按钮
-        self._lock_btn = QPushButton(" 锁定")
-        self._lock_btn.setIcon(get_icon("lock"))
-        self._lock_btn.setStyleSheet(self._add_btn.styleSheet())
-        self._lock_btn.clicked.connect(self._handle_lock)
-        layout.addWidget(self._lock_btn)
-
-        # 搜索栏
-        self.search_bar = SearchBar()
-        self.search_bar.search_changed.connect(self._on_search_changed)
-        layout.addWidget(self.search_bar)
-
-        return bar
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     # ---------- 样式 ----------
 
     def _apply_stylesheet(self):
+        """应用全局样式表。"""
         self.setStyleSheet(GLOBAL_STYLESHEET)
 
     # ---------- 快捷键 ----------
 
     def _setup_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+F"), self, self.search_bar.focus_search)
-        QShortcut(QKeySequence("Ctrl+N"), self, self._on_new_item)
+        """注册全局键盘快捷键。"""
+        # Ctrl+F — 聚焦搜索
+        QShortcut(QKeySequence("Ctrl+F"), self, self._handle_search_focus)
+        # Ctrl+N — 新增当前分类条目
+        QShortcut(QKeySequence("Ctrl+N"), self, self._handle_new_item)
+        # Ctrl+E — 编辑选中条目
         QShortcut(QKeySequence("Ctrl+E"), self, self._handle_edit_current)
+        # Ctrl+C — 复制密码或相关项内容
         QShortcut(QKeySequence("Ctrl+C"), self, self._handle_copy)
+        # Ctrl+L — 锁定应用
         QShortcut(QKeySequence("Ctrl+L"), self, self._handle_lock)
+        # Escape — 清空搜索
         QShortcut(QKeySequence("Escape"), self, self._handle_escape)
 
+    def _handle_search_focus(self):
+        self.search_bar.focus_search()
+
+    def _handle_new_item(self):
+        self._on_new_item()
+
     def _handle_edit_current(self):
-        ci = self.list_view.currentItem()
-        if ci:
-            m = self.list_view._get_model_from_item(ci)
-            if m:
-                self._on_edit_item(m)
+        current_item = self.list_view.currentItem()
+        if current_item:
+            item_model = self.list_view._get_model_from_item(current_item)
+            if item_model:
+                self._on_edit_item(item_model)
 
     def _handle_copy(self):
-        ci = self.list_view.currentItem()
-        if ci:
-            m = self.list_view._get_model_from_item(ci)
-            if m:
-                if m.category == "password":
-                    self._on_copy_password(m)
-                elif m.category == "note":
-                    self._copy_to_clipboard(m.content)
+        current_item = self.list_view.currentItem()
+        if current_item:
+            item_model = self.list_view._get_model_from_item(current_item)
+            if item_model:
+                if item_model.category == "password":
+                    self._on_copy_password(item_model)
+                elif item_model.category == "note":
+                    self._copy_to_clipboard(item_model.content)
                 else:
-                    self._copy_to_clipboard(m.title)
+                    self._copy_to_clipboard(item_model.title)
 
     def _handle_lock(self):
         if self._lock_callback:
@@ -264,222 +312,270 @@ class MainWindow(QMainWindow):
     # ---------- 内容刷新 ----------
 
     def _refresh_content(self):
-        labels = {"password": "密码", "note": "笔记", "document": "文档", "favorite": "收藏"}
-        self.category_title.setText(labels.get(self._current_category, "全部"))
-        items = self.database.get_items(category=self._current_category, search_query=self._search_query)
+        """刷新列表视图和侧边栏标签。"""
+        # 更新分类标题
+        category_labels = {
+            "password": "密码",
+            "note": "笔记",
+            "document": "文档",
+            "favorite": "收藏",
+        }
+        self.category_title.setText(category_labels.get(self._current_category, "全部"))
+
+        # 获取条目
+        items = self.database.get_items(
+            category=self._current_category,
+            search_query=self._search_query,
+        )
+
+        # 解密敏感字段
         for item in items:
             self._decrypt_item(item)
+
+        # 加载到列表
         self.list_view.load_items(items)
+
+        # 更新侧边栏标签
         tags = self.database.get_all_tags()
         self.sidebar.update_tags(tags)
 
-        # 空状态
-        if not items:
-            tips = {"password": "还没有密码条目\n点击 ＋ 新增", "note": "还没有笔记\n点击 ＋ 新建",
-                    "document": "还没有文档\n拖拽文件或点击 ＋ 导入", "favorite": "还没有收藏\n点击 ☆ 收藏条目"}
-            self._empty_label.setText(tips.get(self._current_category, ""))
-            self._empty_label.show()
-            self.list_view.hide()
-        else:
-            self._empty_label.hide()
-            self.list_view.show()
+        # 更新状态栏
         self._update_status_bar()
 
-    def _decrypt_item(self, item):
-        if not self._fernet or item.id is None:
-            return
-        row = self.database.conn.execute(
-            "SELECT data_encrypted, content_encrypted FROM items WHERE id = ?", (item.id,)
-        ).fetchone()
-        if not row:
-            return
-        if item.category == "password" and row["data_encrypted"]:
-            js = decrypt_data(self._fernet, row["data_encrypted"])
-            if js:
-                try:
-                    d = json.loads(js)
-                    item.url = d.get("url", "")
-                    item.account = d.get("account", "")
-                    item.password = d.get("password", "")
-                    item.notes = d.get("notes", "")
-                except json.JSONDecodeError:
-                    pass
-        elif item.category == "note" and row["content_encrypted"]:
-            item.content = decrypt_data(self._fernet, row["content_encrypted"])
+    def _decrypt_item(self, item: ItemModel):
+        """
+        解密条目的加密字段并填入 ItemModel 的属性中。
 
-    # ---------- 保存 ----------
+        数据库中的 data_encrypted 和 content_encrypted 是加密存储的，
+        此方法将它们解密后赋值给 ItemModel 的明文属性。
+        """
+        if not self._fernet:
+            return
 
-    def _save_password_item(self, item):
-        enc = encrypt_data(self._fernet, json.dumps(item.to_dict(), ensure_ascii=False))
+        # 获取数据库中的原始加密数据行
+        row = None
+        if item.id is not None:
+            row = self.database.conn.execute(
+                "SELECT data_encrypted, content_encrypted FROM items WHERE id = ?",
+                (item.id,),
+            ).fetchone()
+
+        if row:
+            if item.category == "password":
+                encrypted_data = row["data_encrypted"]
+                if encrypted_data:
+                    decrypted_json = decrypt_data(self._fernet, encrypted_data)
+                    if decrypted_json:
+                        try:
+                            data = json.loads(decrypted_json)
+                            item.url = data.get("url", "")
+                            item.account = data.get("account", "")
+                            item.password = data.get("password", "")
+                            item.notes = data.get("notes", "")
+                        except json.JSONDecodeError:
+                            pass
+
+            elif item.category == "note":
+                encrypted_content = row["content_encrypted"]
+                if encrypted_content:
+                    item.content = decrypt_data(self._fernet, encrypted_content)
+
+    # ---------- 保存与加密 ----------
+
+    def _save_password_item(self, item: ItemModel):
+        """
+        保存密码条目到数据库 (加密后写入)。
+
+        流程:
+          新建 → add_item 获取 ID → 加密 data_encrypted → update_item
+          编辑 → 加密 data_encrypted → update_item
+        """
+        # 加密敏感字段
+        sensitive_data = item.to_dict()  # url, account, password, notes
+        encrypted = encrypt_data(self._fernet, json.dumps(sensitive_data, ensure_ascii=False))
+
         if item.id is None:
-            item.id = self.database.add_item(item)
-        item._data_encrypted = enc
-        item.updated_at = datetime.now().isoformat()
+            # 新建
+            item_id = self.database.add_item(item)
+            item.id = item_id
+
+        # 更新加密字段 (附加属性 _data_encrypted 传递给 update_item)
+        item._data_encrypted = encrypted
+        item.updated_at = __import__("datetime").datetime.now().isoformat()
         self.database.update_item(item)
 
-    def _save_note_item(self, item):
-        enc = encrypt_data(self._fernet, item.content)
+    def _save_note_item(self, item: ItemModel):
+        """
+        保存笔记条目到数据库 (加密后写入)。
+        """
+        encrypted = encrypt_data(self._fernet, item.content)
+
         if item.id is None:
-            item.id = self.database.add_item(item)
-        item._content_encrypted = enc
-        item.updated_at = datetime.now().isoformat()
+            item_id = self.database.add_item(item)
+            item.id = item_id
+
+        item._content_encrypted = encrypted
+        item.updated_at = __import__("datetime").datetime.now().isoformat()
         self.database.update_item(item)
 
-    def _save_document_item(self, item):
+    def _save_document_item(self, item: ItemModel):
+        """
+        保存文档条目到数据库 (元数据明文，无加密内容)。
+        """
         if item.id is None:
-            item.id = self.database.add_item(item)
+            item_id = self.database.add_item(item)
+            item.id = item_id
         else:
             item._data_encrypted = ""
             item._content_encrypted = ""
-            item.updated_at = datetime.now().isoformat()
+            item.updated_at = __import__("datetime").datetime.now().isoformat()
             self.database.update_item(item)
 
     # ---------- 信号处理 ----------
 
-    def _on_category_changed(self, cat):
-        self._current_category = cat
+    def _on_category_changed(self, category: str):
+        """侧边栏分类切换。"""
+        self._current_category = category
         self.search_bar.clear()
         self._search_query = ""
         self._refresh_content()
 
-    def _on_tag_selected(self, tag):
+    def _on_tag_selected(self, tag: str):
+        """侧边栏标签点击 — 在搜索框中设置标签关键词。"""
         self.search_bar.search_input.setText(tag)
         self._search_query = tag
         self._refresh_content()
 
-    def _on_search_changed(self, q):
-        self._search_query = q.strip()
+    def _on_search_changed(self, query: str):
+        """搜索框文本变化。"""
+        self._search_query = query.strip()
         self._refresh_content()
 
     def _on_new_item(self):
-        cat = self._current_category
-        if cat == "favorite":
-            cat = "password"
-        if cat == "password":
-            dlg = PasswordEditor(parent=self)
-            dlg.item_saved.connect(self._on_password_saved)
-        elif cat == "note":
-            dlg = NoteEditor(parent=self)
-            dlg.item_saved.connect(self._on_note_saved)
-        elif cat == "document":
-            dlg = DocumentImporter(parent=self)
-            dlg.item_saved.connect(self._on_document_saved)
+        """新增当前分类条目。"""
+        category = self._current_category
+        if category == "favorite":
+            category = "password"  # 收藏不是可新建的分类，默认新建密码
+
+        if category == "password":
+            dialog = PasswordEditor(parent=self)
+            dialog.item_saved.connect(self._on_password_saved)
+        elif category == "note":
+            dialog = NoteEditor(parent=self)
+            dialog.item_saved.connect(self._on_note_saved)
+        elif category == "document":
+            dialog = DocumentImporter(parent=self)
+            dialog.item_saved.connect(self._on_document_saved)
         else:
             return
-        self._center_dialog(dlg)
-        dlg.exec_()
 
-    def _on_edit_item(self, item):
+        self._center_dialog(dialog)
+        dialog.exec_()
+
+    def _on_edit_item(self, item: ItemModel):
+        """编辑选中条目。"""
         if item.category == "password":
-            dlg = PasswordEditor(item=item, parent=self)
-            dlg.item_saved.connect(self._on_password_saved)
-            self._center_dialog(dlg)
-            dlg.exec_()
+            editor = PasswordEditor(item=item, parent=self)
+            editor.item_saved.connect(self._on_password_saved)
+            self._center_dialog(editor)
+            editor.exec_()
         elif item.category == "note":
-            dlg = NoteEditor(item=item, parent=self)
-            dlg.item_saved.connect(self._on_note_saved)
-            self._center_dialog(dlg)
-            dlg.exec_()
+            editor = NoteEditor(item=item, parent=self)
+            editor.item_saved.connect(self._on_note_saved)
+            self._center_dialog(editor)
+            editor.exec_()
+        elif item.category == "document":
+            # 文档不可编辑内容，仅切换收藏
+            pass
 
-    def _on_password_saved(self, item):
+    def _on_password_saved(self, item: ItemModel):
+        """密码编辑器保存后的回调。"""
         self._save_password_item(item)
         self._refresh_content()
 
-    def _on_note_saved(self, item):
+    def _on_note_saved(self, item: ItemModel):
+        """笔记编辑器保存后的回调。"""
         self._save_note_item(item)
         self._refresh_content()
 
-    def _on_document_saved(self, item):
+    def _on_document_saved(self, item: ItemModel):
+        """文档导入完成后的回调。"""
         self._save_document_item(item)
         self._refresh_content()
 
-    def _on_delete_item(self, item):
-        r = QMessageBox.question(self, "确认删除", f"确定要删除 \"{item.title}\" 吗？",
-                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if r == QMessageBox.Yes:
+    def _on_delete_item(self, item: ItemModel):
+        """删除条目。"""
+        reply = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定要删除 \"{item.title}\" 吗？此操作不可撤销。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
             self.database.delete_item(item.id)
             self._refresh_content()
 
-    def _on_toggle_favorite(self, item):
+    def _on_toggle_favorite(self, item: ItemModel):
+        """切换收藏状态。"""
         item.is_favorite = not item.is_favorite
-        item._data_encrypted = ""
+        item.updated_at = __import__("datetime").datetime.now().isoformat()
+        item._data_encrypted = ""  # 不修改加密内容
         item._content_encrypted = ""
-        item.updated_at = datetime.now().isoformat()
         self.database.update_item(item)
         self._refresh_content()
 
-    def _on_copy_password(self, item):
+    def _on_copy_password(self, item: ItemModel):
+        """复制密码到剪贴板。"""
         if item.password:
             self._copy_to_clipboard(item.password)
-            self._show_toast(f"✓ 已复制 \"{item.title}\" 的密码")
+            self.status_label.setText(f"已复制 \"{item.title}\" 的密码")
 
-    def _on_copy_account(self, item):
+    def _on_copy_account(self, item: ItemModel):
+        """复制账号到剪贴板。"""
         if item.account:
             self._copy_to_clipboard(item.account)
-            self._show_toast(f"✓ 已复制 \"{item.title}\" 的账号")
+            self.status_label.setText(f"已复制 \"{item.title}\" 的账号")
 
-    def _on_open_document(self, item):
+    def _on_open_document(self, item: ItemModel):
+        """用系统程序打开文档。"""
         if item.stored_path:
             open_document_file(item.stored_path)
 
-    # ---------- Toast 提示 ----------
+    # ---------- 工具方法 ----------
 
-    def _show_toast(self, text):
-        toast = QLabel(text, parent=self._container)
-        toast.setStyleSheet(f"""
-            QLabel {{
-                background-color: {COLORS['accent']};
-                color: {COLORS['text_inverse']};
-                border-radius: 8px;
-                padding: 8px 20px;
-                font-size: 12px;
-            }}
-        """)
-        toast.adjustSize()
-        cw = self._container.width()
-        ch = self._container.height()
-        toast.move((cw - toast.width()) // 2, ch - toast.height() - 50)
-        toast.show()
-
-        # 渐隐动画
-        anim = QPropertyAnimation(toast, b"windowOpacity")
-        anim.setDuration(2000)
-        anim.setStartValue(1.0)
-        anim.setEndValue(0.0)
-        anim.setEasingCurve(QEasingCurve.InCubic)
-        anim.finished.connect(toast.deleteLater)
-        anim.start()
-
-    # ---------- 工具 ----------
-
-    def _copy_to_clipboard(self, text):
-        QApplication.clipboard().setText(text)
+    def _copy_to_clipboard(self, text: str):
+        """复制文本到系统剪贴板。"""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
 
     def _update_status_bar(self):
+        """更新状态栏统计信息。"""
         items = self.database.get_items(category=self._current_category)
-        self.status_label.setText(f"共 {len(items)} 条")
+        count = len(items)
+        self.status_label.setText(f"共 {count} 条")
 
     def _center_dialog(self, dialog):
-        # 使用屏幕几何确保首次显示也不会偏移
-        geo = self.geometry()
-        if geo.x() == 0 and geo.y() == 0:
-            from PyQt5.QtWidgets import QApplication
-            screen = QApplication.primaryScreen().availableGeometry()
-            geo.moveCenter(screen.center())
-        sz = dialog.size()
-        x = geo.x() + (geo.width() - sz.width()) // 2
-        y = geo.y() + (geo.height() - sz.height()) // 2
-        dialog.move(max(0, x), max(0, y))
+        """将对话框居中于主窗口。"""
+        parent_geo = self.geometry()
+        size = dialog.size()
+        x = parent_geo.x() + (parent_geo.width() - size.width()) // 2
+        y = parent_geo.y() + (parent_geo.height() - size.height()) // 2
+        dialog.move(x, y)
 
-    # ---------- 锁定 ----------
+    # ---------- 锁定时的清理 ----------
 
     def lock(self):
+        """
+        锁定应用: 清除内存中的 Fernet 密钥和解密数据，显示空白状态。
+        """
         self._fernet = None
         self.list_view.clear()
         self.list_view._item_models.clear()
         self.status_label.setText("已锁定")
 
     def closeEvent(self, event):
+        """窗口关闭时清理数据库连接。"""
         self.database.set_setting("locked", "1")
         self._fernet = None
         self.database.close()

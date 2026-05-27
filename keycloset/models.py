@@ -149,8 +149,8 @@ class ItemModel:
 
 # 分类定义 — 侧边栏导航使用
 CATEGORIES = [
-    {"key": "password", "label": "密码", "icon": "password"},
-    {"key": "note", "label": "笔记", "icon": "note"},
-    {"key": "document", "label": "文档", "icon": "document"},
-    {"key": "favorite", "label": "收藏", "icon": "favorite"},
+    {"key": "password", "label": "密码", "icon": "🔑"},
+    {"key": "note", "label": "笔记", "icon": "📝"},
+    {"key": "document", "label": "文档", "icon": "📁"},
+    {"key": "favorite", "label": "收藏", "icon": "⭐"},
 ]

@@ -87,19 +87,19 @@ class KeyClosetApp(QApplication):
         Args:
             master_password: 已验证正确的主密码
         """
-        # 标记 login_dialog 即将由 accept() 正常关闭，不应退出
-        self._login_success = True
-
-        # 创建主窗口
-        self._main_window = MainWindow(
-            database=self.database,
-            master_password=master_password,
-            lock_callback=self.lock,
-        )
-        self._main_window.show()
-
-        # 启动空闲监控
-        self._start_idle_monitor()
+        import sys, traceback
+        try:
+            self._login_success = True
+            self._main_window = MainWindow(
+                database=self.database,
+                master_password=master_password,
+                lock_callback=self.lock,
+            )
+            self._main_window.show()
+            self._start_idle_monitor()
+        except Exception as e:
+            print(f"[ERROR] Failed to create MainWindow: {e}", file=sys.stderr)
+            traceback.print_exc()
 
     def _on_login_finished(self, result: int):
         """

@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..models import CATEGORIES
-from .theme import COLORS, SIDEBAR_STYLESHEET, get_icon
+from .theme import COLORS, SIDEBAR_STYLESHEET
 
 
 class Sidebar(QWidget):
@@ -52,10 +52,8 @@ class Sidebar(QWidget):
         self.category_list.setSpacing(0)
 
         for cat in CATEGORIES:
-            icon = get_icon(cat["icon"])
-            item = QListWidgetItem(f"     {cat['label']}")
-            item.setIcon(icon)
-            item.setData(1, cat["key"])
+            item = QListWidgetItem(f"  {cat['icon']}  {cat['label']}")
+            item.setData(1, cat["key"])  # 在 item data 中存储 key
             self.category_list.addItem(item)
 
         self.category_list.setCurrentRow(0)  # 默认选中"密码"
