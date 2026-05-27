@@ -49,22 +49,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("KeyCloset Hub")
         self.setMinimumSize(DIMENSIONS["window_min_width"], DIMENSIONS["window_min_height"])
         self.resize(DIMENSIONS["window_width"], DIMENSIONS["window_height"])
-        self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
 
         # 外层容器 — 负责圆角和阴影
         self._container = QWidget(objectName="windowContainer")
         self._container.setStyleSheet(f"""
             #windowContainer {{
                 background-color: {COLORS['bg_window']};
+                border: 1px solid {COLORS['border_light']};
                 border-radius: {DIMENSIONS['border_radius_window']}px;
             }}
         """)
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(SHADOW["blur_radius"])
-        shadow.setOffset(SHADOW["offset_x"], SHADOW["offset_y"])
-        shadow.setColor(QColor(0, 0, 0, SHADOW["color_alpha"]))
-        self._container.setGraphicsEffect(shadow)
         self.setCentralWidget(self._container)
 
         # 容器内布局
@@ -135,14 +130,6 @@ class MainWindow(QMainWindow):
         self.status_bar.addWidget(self.status_label)
         outer.addWidget(self.status_bar)
         self._update_status_bar()
-
-    def resizeEvent(self, event):
-        """动态圆角遮罩。"""
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), DIMENSIONS["border_radius_window"],
-                            DIMENSIONS["border_radius_window"])
-        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
-        super().resizeEvent(event)
 
     # ---------- 标题栏 ----------
 
