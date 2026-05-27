@@ -1,0 +1,17 @@
+# KeyCloset Hub - Python 依赖清单
+# 安装方式: pip install -r requirements.txt
+
+# GUI 框架 — 无边框窗口、自定义样式、快捷键支持
+PyQt5>=5.15.0
+
+# 加密核心 — Fernet 对称加密 + PBKDF2HMAC 密钥派生
+cryptography>=41.0.0
+
+# Markdown 渲染 — 将 .md 转为 HTML 预览
+markdown>=3.5.0
+
+# 代码语法高亮 — 为 Markdown 代码块提供彩色高亮
+Pygments>=2.16.0
+
+# (可选) PyInstaller — 打包为独立 .exe
+# pyinstaller>=5.0.0
